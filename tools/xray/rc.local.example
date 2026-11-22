@@ -1,0 +1,11 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# virtual IP for udpxy multicast source on the ITV VLAN (must exist before
+# udpxy subscriptions; see /etc/init.d/udpxy -m flag)
+ip addr add 192.168.77.1/24 dev eth0.3
+
+# xray TUN policy routing (waits up to 30s for tun0; xray starts at S99)
+/etc/xray-tun-routes.sh
+
+exit 0

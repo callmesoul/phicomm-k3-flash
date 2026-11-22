@@ -17,12 +17,16 @@ phicomm-k3-flash/
 │   ├── flashing-guide.md     完整刷机流程（进 CFE → TFTP → do.htm → 重启）
 │   ├── pitfalls.md           坑清单（现象 → 原因 → 解决）
 │   ├── post-flash.md         刷后必做配置与常用诊断
+│   ├── proxy-transparent-gateway.md  Xray TUN 透明网关（全屋代理 + DNS 分流）
+│   ├── iptv-udpxy.md         IPTV 组播转单播（广东电信 + udpxy）
 │   └── compatibility/        固件版本兼容矩阵（欢迎贡献）
 │       ├── README.md         矩阵总览与条目模板
 │       └── openwrt-19.07.10.md
 └── tools/
     ├── tftpd.py              极简 TFTP 服务器（RFC 1350，专为 K3 CFE 定制）
     ├── k3ssh.sh              SSH 助手（适配 Windows OpenSSH + 老版 dropbear）
+    ├── xray/                 透明网关部署文件（gen_config.py、init.d、防火墙、路由脚本）
+    ├── iptv/                 频道表（udpxy 单播格式，316 频道）
     └── README.md             工具说明
 ```
 
