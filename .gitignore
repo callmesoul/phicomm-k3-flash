@@ -1,0 +1,14 @@
+# 固件二进制不入库（放官方链接 + sha256，见 CONTRIBUTING.md）
+*.trx
+*.bin
+*.img
+*.chk
+firmware/
+
+# Python
+__pycache__/
+*.pyc
+
+# 系统
+.DS_Store
+Thumbs.db
