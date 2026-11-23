@@ -63,7 +63,7 @@ def sub_url():
 
 def pc_ip():
     out = subprocess.run(['ipconfig'], capture_output=True, text=True,
-                         errors='ignore').stdout
+                         errors='replace').stdout
     m = re.search(r'IPv4[^\n]*:\s*(192\.168\.2\.\d+)', out)
     if not m:
         raise SystemExit('PC is not on 192.168.2.x, cannot serve the config')
@@ -85,7 +85,8 @@ def deploy():
                "&& /etc/init.d/xray restart && sleep 3 "
                "&& sh /etc/xray-tun-routes.sh") % ip
         r = subprocess.run(SSH + [K3, cmd], env=SSH_ENV,
-                           capture_output=True, text=True, timeout=90)
+                           capture_output=True, text=True, errors='replace',
+                           timeout=90)
         if r.returncode != 0:
             log('DEPLOY FAILED: %s %s' % (r.stdout.strip(), r.stderr.strip()))
             sys.exit(1)
@@ -107,7 +108,8 @@ def curl_proxy(port, url, timeout, measure_speed=False):
         r = subprocess.run(
             ['curl', '-s', '-o', os.devnull, '--max-time', str(timeout),
              '-x', 'http://192.168.2.1:%d' % port, '-w', fmt, url],
-            capture_output=True, text=True, timeout=timeout + 5)
+            capture_output=True, text=True, errors='replace',
+            timeout=timeout + 5)
         parts = r.stdout.strip().split()
         code = parts[0] if parts else '000'
         speed = float(parts[1]) if measure_speed and len(parts) > 1 else 0.0
@@ -169,9 +171,9 @@ def pick(res, indices=None):
 
 def verify(main_win, sg_win):
     def curl(extra, url):
-        return subprocess.run(
+        return (subprocess.run(
             ['curl', '-s', '--max-time', '20'] + extra + [url],
-            capture_output=True, text=True).stdout.strip()
+            capture_output=True, text=True, errors='replace').stdout or '').strip()
 
     g = curl(['-o', os.devnull, '-w', '%{http_code}',
               '-x', 'http://192.168.2.1:7890'], GOOGLE_204)
@@ -179,7 +181,8 @@ def verify(main_win, sg_win):
                  'https://%s/cdn-cgi/trace' % JAVDB)
     page = subprocess.run(
         ['curl', '-s', '--max-time', '25', '-x', 'http://192.168.2.1:7890',
-         'https://%s/' % JAVDB], capture_output=True, text=True).stdout
+         'https://%s/' % JAVDB], capture_output=True, text=True,
+        errors='replace').stdout or ''
     ok = 'JavDB' in page or 'javdb' in page.lower() or '數據' in page
     print()
     log('verify: google via 7890 -> %s' % g)
