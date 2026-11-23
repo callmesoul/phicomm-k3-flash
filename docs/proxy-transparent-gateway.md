@@ -60,6 +60,23 @@
 | 8 | 客户端测试结果诡异（时好时坏） | PC 同时有 USB tether（跃点低抢默认路由）或本机 Clash 劫持流量，测试流量根本没进 K3 | 测试前拔 tether、退出本机代理，确认默认路由唯一指向 192.168.2.1 |
 | 9 | v26 移除了 loadbalancer 协议 / dokodemo 隐式 DNS 拦截等 | v26 配置与网上旧教程不兼容 | 以 `xray run -test` 校验配置为准；节点切换 = 重新生成配置（首个 outbound 即默认路由） |
 | 10 | Git Bash 调 ssh 时 /etc 等路径被转成 Windows 路径 | MSYS 路径转换 | 加 `MSYS_NO_PATHCONV=1` |
+| 11 | 某个国外网站突然打不开，但 curl 能连上（或只看到它的"地区封锁"提示页） | **网站自己按地区/机房封锁出口 IP**，与墙无关。实测 javdb.com 封锁大陆与日本机房出口（"Due to copyright restrictions"），港/新/台出口正常；CloudFront 类站点（如 platform.deepseek.com）会对无 JS 客户端发 WAF challenge（202/403），真实浏览器可通过 | 换出口地区合适的节点；先 `curl -x 代理 https://站点/cdn-cgi/trace` 看出口 `loc=` 再下结论 |
+| 12 | 视频一卡一卡、下载龟速，但网页能打开 | 同一订阅各节点吞吐差距可达 **50 倍以上**（实测深夜机场 CDN 拥塞时：台湾节点 23KB/s、新加坡节点 1.2MB/s）；网页加载只暴露 RTT，不暴露带宽 | 用 `speed.cloudflare.com/__down?bytes=N` 实测**单连接吞吐**选节点（见下 auto_select.py），别只看 ping/网页 |
+| 13 | 华为等 IoT 设备（音箱/家庭云存储）批量"连不上"，但 PC 上网正常 | xray 每次重启 tun0 有几十秒空窗，IoT 的长连接云会话（XMPP/CoAP/QUIC）被打断后自愈很慢（有的按小时级重连）；设备侧还常缓存坏 DNS | 避免频繁切节点/重启；设备断电重启 + 手机 App 强杀重开；下次重连前先抓包确认设备云流量（`tcpdump -i br-lan host <设备IP>`） |
+| 14 | 给 7890/7891 显式代理配置了域名分流规则但不生效 | http/socks inbound **默认不开 sniffing**，路由规则拿不到域名，按 IP 匹配走了默认节点；只有 tun-in 天然有 sniffing | 给 http-in/socks-in 加 `"sniffing": {"enabled": true, "destOverride": ["http","tls"]}` |
+| 15 | 域名分流指向的节点连不通/不稳定 | 只有主节点 outbound 带 `sockopt.mark=1`；分流目标节点不带 mark 时其出站 socket 可能被策略路由劫持进 tun0 造成环路 | 域名规则指向的节点 outbound 也要 `sockopt: {mark: 1}`（gen_config.py 已自动处理） |
+| 16 | 想要 Clash 式"自动选最快节点"，但 v26 没有 url-test/loadbalancer | v26 移除 loadbalancer，且运行时无法动态改路由 | 每节点挂一个测试入站（`17900+i` → `node-i`），一个配置测全部节点，PC 侧脚本测 RTT+吞吐后重生成配置（见下 auto_select.py） |
+
+## Clash 式自动选优（auto_select.py）
+
+K3 的 arm32-v5 环境跑不了任何 Go 程序（含 Clash/mihomo），Xray v26 又没有 url-test。等价的实现（`tools/xray/auto_select.py`，PC 上运行）：
+
+1. 生成一个**带测试口的配置**：每个订阅节点一个 HTTP 测试入站（`0.0.0.0:17900+i`），路由规则 `test-in-i → node-i`。一份配置即可测全部节点，**不用逐个重启 xray**；
+2. 部署后逐节点测：RTT（google 204，并发）+ 单连接吞吐（CF 2MB 下载，串行——并发测会让节点抢共享 CDN，结果失真）；
+3. 选优：默认出口 = 吞吐最快（top 25% 内取 RTT 最低）；`javdb.com` 域名规则分流到最快的新加坡节点（订阅序号 6/7/8，可改脚本常量）；
+4. 部署最终配置（测试口保留，方便下次复测），验证 google + javdb 出口。
+
+用法：`python tools/xray/auto_select.py`（自动从同目录 update_k3.sh 读订阅 URL）。机场拥塞时段复测一次即可，全程约 5-10 分钟。
 
 ## 验证清单
 
@@ -79,4 +96,4 @@ curl -I https://www.google.com   # 经节点
 ## 降级行为
 
 - xray 进程崩溃、procd respawn 后：table 100 路由随 tun0 重建丢失 → 客户端退回直连（国内正常、国外不可用），5 分钟内 cron 自愈
-- 节点失效：国外站点与国外 DNS 不可用（国内直连不受影响）；`update_k3.sh <序号>` 切换节点
+- 节点失效：国外站点与国外 DNS 不可用（国内直连不受影响）；`update_k3.sh <序号>` 切换节点，或 `auto_select.py` 全量复测自动换最快

@@ -3,8 +3,11 @@
 """Generate xray config.json from the subscription node list.
 
 Usage: python gen_config.py <subscription-file> <output-config> [main-node-index]
+                            [--domain=javdb.com=6] [--test-ports]
 
-Design (verified working on K3, 2026-11-23):
+Also importable from auto_select.py: parse_nodes() / build_config().
+
+Design (verified working on K3, 2026-11-23/24):
   - TUN inbound (tun0, 10.0.0.1/16): LAN clients are marked 2 in mangle and
     policy-routed into the TUN (see /etc/firewall.user + /etc/xray-tun-routes.sh).
   - DNS: dnsmasq forwards everything to 10.0.0.2:53 -> tun-in:53 -> dns-out ->
@@ -16,15 +19,26 @@ Design (verified working on K3, 2026-11-23):
     address never depends on the proxied DNS (bootstrap loop).
   - Routing: dns module connections to CN resolvers go direct, the rest via
     proxy; client traffic splits on geoip:cn/private -> direct, else proxy.
+  - Domain rules (--domain=...): emitted BEFORE the geoip rule, so a domain
+    like javdb.com can be pinned to a specific node (e.g. a Singapore node)
+    regardless of its IP. tun-in sniffs SNI; http-in/socks-in also sniff so
+    explicit-proxy users get the same split.
+  - Test ports (--test-ports): one HTTP inbound per subscription node on
+    0.0.0.0:17900+i with routing test-in-XX -> node-XX. Lets auto_select.py
+    benchmark every node through one deployed config (no per-node restarts);
+    Clash-style url-test selection lives in auto_select.py.
+
+Deprecated-but-working quirks of v26 the config must keep (do not "fix"):
+  - vmess+ws with headers.host (deprecated warnings but functional)
+  - loadbalancer protocol no longer exists in v26 -> node switching is done
+    by regenerating the config (see auto_select.py / update_k3.sh)
 """
 import base64
 import json
 import socket
 import sys
 
-SUB = sys.argv[1]
-OUT = sys.argv[2]
-MAIN_NODE = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+TEST_PORT_BASE = 17900
 
 
 def decode_body(path):
@@ -49,14 +63,27 @@ def resolve_host(addr):
         return None
 
 
-def main():
-    body = decode_body(SUB)
-    lines = [l.strip() for l in body.splitlines() if l.strip()]
+def parse_nodes(sub_path):
+    """Return the vmess node dicts in subscription order (skips non-vmess)."""
+    body = decode_body(sub_path)
+    nodes = []
+    for line in (l.strip() for l in body.splitlines() if l.strip()):
+        if line.startswith('vmess://'):
+            nodes.append(json.loads(base64.b64decode(line[8:] + '===').decode()))
+    return nodes
+
+
+def build_config(nodes, main_idx, domain_rules=None, test_ports=False):
+    """Build the full xray config dict.
+
+    nodes: list of vmess dicts (subscription order, index = node id)
+    main_idx: index of the node that becomes the default 'proxy' outbound
+    domain_rules: {domain: node_index} routed before the geoip rule
+    test_ports: add per-node HTTP test inbounds on 17900+i
+    """
+    domain_rules = domain_rules or {}
     outbounds, hosts = [], {}
-    for i, l in enumerate(lines):
-        if not l.startswith('vmess://'):
-            continue
-        d = json.loads(base64.b64decode(l[8:] + '===').decode())
+    for i, d in enumerate(nodes):
         tag = 'node-%02d' % i
         settings = {"vnext": [{
             "address": d.get('add'), "port": int(d.get('port', 0)),
@@ -91,48 +118,81 @@ def main():
     # (v26 removed the loadbalancer protocol; node switching = regenerate config)
     if not outbounds:
         raise SystemExit('no vmess nodes in subscription')
-    main = outbounds.pop(min(MAIN_NODE, len(outbounds) - 1))
+    main = outbounds.pop(min(main_idx, len(outbounds) - 1))
     main['tag'] = 'proxy'
     main['mux'] = {'enabled': True}
     # mark 1: xray's own outbound sockets bypass policy routing into the TUN
     main.setdefault('streamSettings', {})['sockopt'] = {'mark': 1}
     outbounds = [main] + outbounds
+
+    def tag_of(idx):
+        return 'proxy' if idx == main_idx else 'node-%02d' % idx
+
+    # domain-rule targets need mark 1 as well (their sockets must also
+    # bypass policy routing into the TUN)
+    for idx in domain_rules.values():
+        for ob in outbounds:
+            if ob['tag'] == tag_of(idx):
+                ob.setdefault('streamSettings', {})['sockopt'] = {'mark': 1}
+
     outbounds.append({"tag": "direct", "protocol": "freedom"})
     outbounds.append({"tag": "dns-out", "protocol": "dns",
                       "streamSettings": {"sockopt": {"mark": 1}}})
 
+    inbounds = [
+        {"tag": "tun-in", "protocol": "tun",
+         "settings": {"name": "tun0", "mtu": 1500,
+                      "gateway": ["10.0.0.1/16"]},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+        {"tag": "http-in", "listen": "0.0.0.0", "port": 7890,
+         "protocol": "http",
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+        {"tag": "socks-in", "listen": "0.0.0.0", "port": 7891,
+         "protocol": "socks", "settings": {"auth": "noauth", "udp": True},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+        # legacy REDIRECT target (unused by the TUN design, kept for parity)
+        {"tag": "transparent", "listen": "0.0.0.0", "port": 12345,
+         "protocol": "dokodemo-door",
+         "settings": {"network": "tcp", "followRedirect": True},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+    ]
+
+    rules = [
+        # DNS queries arriving via the TUN gateway go to the DNS module
+        {"type": "field", "inboundTag": ["tun-in"], "port": 53,
+         "outboundTag": "dns-out"},
+        # DNS module's upstream connections: CN resolvers direct...
+        {"type": "field", "inboundTag": ["dns_inbound"],
+         "ip": ["geoip:cn"], "outboundTag": "direct"},
+        # ...foreign resolvers via the proxy
+        {"type": "field", "inboundTag": ["dns_inbound"],
+         "outboundTag": "proxy"},
+    ]
+
+    if test_ports:
+        for i in range(len(nodes)):
+            inbounds.append({
+                "tag": "test-in-%02d" % i,
+                "listen": "0.0.0.0", "port": TEST_PORT_BASE + i,
+                "protocol": "http",
+            })
+            rules.append({"type": "field", "inboundTag": ["test-in-%02d" % i],
+                          "outboundTag": tag_of(i)})
+
+    # per-domain split rules (e.g. javdb.com -> Singapore node)
+    for domain, idx in domain_rules.items():
+        rules.append({"type": "field", "domain": ["domain:" + domain],
+                      "outboundTag": tag_of(idx)})
+
+    # client traffic split
+    rules.append({"type": "field", "ip": ["geoip:cn", "geoip:private"],
+                  "outboundTag": "direct"})
+
     config = {
         "log": {"loglevel": "warning"},
-        "inbounds": [
-            {"tag": "tun-in", "protocol": "tun",
-             "settings": {"name": "tun0", "mtu": 1500,
-                          "gateway": ["10.0.0.1/16"]},
-             "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
-            {"tag": "http-in", "listen": "0.0.0.0", "port": 7890,
-             "protocol": "http"},
-            {"tag": "socks-in", "listen": "0.0.0.0", "port": 7891,
-             "protocol": "socks", "settings": {"auth": "noauth", "udp": True}},
-            # legacy REDIRECT target (unused by the TUN design, kept for parity)
-            {"tag": "transparent", "listen": "0.0.0.0", "port": 12345,
-             "protocol": "dokodemo-door",
-             "settings": {"network": "tcp", "followRedirect": True},
-             "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
-        ],
+        "inbounds": inbounds,
         "outbounds": outbounds,
-        "routing": {"rules": [
-            # DNS queries arriving via the TUN gateway go to the DNS module
-            {"type": "field", "inboundTag": ["tun-in"], "port": 53,
-             "outboundTag": "dns-out"},
-            # DNS module's upstream connections: CN resolvers direct...
-            {"type": "field", "inboundTag": ["dns_inbound"],
-             "ip": ["geoip:cn"], "outboundTag": "direct"},
-            # ...foreign resolvers via the proxy
-            {"type": "field", "inboundTag": ["dns_inbound"],
-             "outboundTag": "proxy"},
-            # client traffic split
-            {"type": "field", "ip": ["geoip:cn", "geoip:private"],
-             "outboundTag": "direct"},
-        ]},
+        "routing": {"rules": rules},
         "dns": {
             "hosts": hosts,
             "servers": [
@@ -142,10 +202,27 @@ def main():
             "tag": "dns_inbound",
         },
     }
-    with open(OUT, 'w', encoding='utf-8') as f:
+    return config
+
+
+def main(argv):
+    sub, out = argv[1], argv[2]
+    main_idx = int(argv[3]) if len(argv) > 3 else 0
+    domain_rules = {}
+    test_ports = False
+    for a in argv[4:]:
+        if a == '--test-ports':
+            test_ports = True
+        elif a.startswith('--domain='):
+            dom, idx = a[len('--domain='):].split('=')
+            domain_rules[dom] = int(idx)
+    nodes = parse_nodes(sub)
+    config = build_config(nodes, main_idx, domain_rules, test_ports)
+    with open(out, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
-    print('nodes: %d, hosts: %d -> %s' % (len(outbounds) - 2, len(hosts), OUT))
+    print('nodes: %d, hosts: %d -> %s'
+          % (len(nodes), len(config['dns']['hosts']), out))
 
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv)

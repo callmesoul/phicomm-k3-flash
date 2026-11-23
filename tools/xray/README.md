@@ -5,8 +5,9 @@
 | 文件 | 安装位置 | 说明 |
 |---|---|---|
 | `xray.initd` | `/etc/init.d/xray` | procd 托管服务（开机自启、崩溃 respawn），记得 `chmod +x` + `enable` |
-| `gen_config.py` | PC 任意位置 | 从订阅（base64 的 vmess:// 列表）生成 config.json；节点域名自动解析写入 `dns.hosts`（防引导环） |
+| `gen_config.py` | PC 任意位置 | 从订阅（base64 的 vmess:// 列表）生成 config.json；节点域名自动解析写入 `dns.hosts`（防引导环）；支持 `--domain=站点=序号` 域名分流与 `--test-ports` 每节点测试口 |
 | `update_k3.sh` | PC 任意位置 | 一条命令完成：拉订阅 → 生成 → 局域网 HTTP 传送 → 校验 → 重启 xray → 恢复 TUN 路由 |
+| `auto_select.py` | PC 任意位置 | Clash 式自动选优：部署测试口配置 → 逐节点测 RTT+吞吐 → 默认出口选最快、`javdb.com` 分流到最快新加坡节点 → 部署最终配置（见 [proxy-transparent-gateway.md](../../docs/proxy-transparent-gateway.md)） |
 | `firewall.user` | `/etc/firewall.user` | mangle 打 mark 0x2 + FORWARD 放行 tun0↔br-lan（缺了它客户端流量全被 DROP） |
 | `xray-tun-routes.sh` | `/etc/xray-tun-routes.sh` | 策略路由配置（幂等，可重复跑），`chmod +x` |
 | `rc.local.example` | 参考 `/etc/rc.local` | 开机调用 tun-routes 脚本；**推送后必须 `chmod +x`**（无执行位则开机不执行） |
@@ -19,6 +20,9 @@ python gen_config.py sub.txt config.json 0
 
 # 一键更新（含传送到 K3 + 重启 + 自愈）
 ./update_k3.sh 0
+
+# Clash 式自动选优（全节点测速，默认出口最快 + javdb.com 走最快新加坡节点）
+python auto_select.py
 ```
 
 `update_k3.sh` 首次使用前需改三处：
