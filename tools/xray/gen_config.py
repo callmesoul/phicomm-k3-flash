@@ -23,6 +23,14 @@ Design (verified working on K3, 2026-11-23/24):
     like javdb.com can be pinned to a specific node (e.g. a Singapore node)
     regardless of its IP. tun-in sniffs SNI; http-in/socks-in also sniff so
     explicit-proxy users get the same split.
+  - sniffing routeOnly: true is REQUIRED. Without it, destOverride rewrites
+    the connection target to the sniffed domain, and the geoip:cn rule then
+    resolves that domain to get IPs -- Huawei IoT devices connect to CN IPs
+    with SNI of hwcloudtest.cn domains that are NXDOMAIN on public DNS, so
+    the geoip match got no IPs and the traffic fell through to the proxy
+    (overseas IP -> Huawei cloud refuses -> devices offline, 2026-11-24).
+    routeOnly keeps the original IP as the target; the sniffed domain is
+    still used for the domain rules.
   - Test ports (--test-ports): one HTTP inbound per subscription node on
     0.0.0.0:17900+i with routing test-in-XX -> node-XX. Lets auto_select.py
     benchmark every node through one deployed config (no per-node restarts);
@@ -143,18 +151,22 @@ def build_config(nodes, main_idx, domain_rules=None, test_ports=False):
         {"tag": "tun-in", "protocol": "tun",
          "settings": {"name": "tun0", "mtu": 1500,
                       "gateway": ["10.0.0.1/16"]},
-         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                      "routeOnly": True}},
         {"tag": "http-in", "listen": "0.0.0.0", "port": 7890,
          "protocol": "http",
-         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                      "routeOnly": True}},
         {"tag": "socks-in", "listen": "0.0.0.0", "port": 7891,
          "protocol": "socks", "settings": {"auth": "noauth", "udp": True},
-         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                      "routeOnly": True}},
         # legacy REDIRECT target (unused by the TUN design, kept for parity)
         {"tag": "transparent", "listen": "0.0.0.0", "port": 12345,
          "protocol": "dokodemo-door",
          "settings": {"network": "tcp", "followRedirect": True},
-         "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls"],
+                      "routeOnly": True}},
     ]
 
     rules = [

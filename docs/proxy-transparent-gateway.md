@@ -62,10 +62,11 @@
 | 10 | Git Bash 调 ssh 时 /etc 等路径被转成 Windows 路径 | MSYS 路径转换 | 加 `MSYS_NO_PATHCONV=1` |
 | 11 | 某个国外网站突然打不开，但 curl 能连上（或只看到它的"地区封锁"提示页） | **网站自己按地区/机房封锁出口 IP**，与墙无关。实测 javdb.com 封锁大陆与日本机房出口（"Due to copyright restrictions"），港/新/台出口正常；CloudFront 类站点（如 platform.deepseek.com）会对无 JS 客户端发 WAF challenge（202/403），真实浏览器可通过 | 换出口地区合适的节点；先 `curl -x 代理 https://站点/cdn-cgi/trace` 看出口 `loc=` 再下结论 |
 | 12 | 视频一卡一卡、下载龟速，但网页能打开 | 同一订阅各节点吞吐差距可达 **50 倍以上**（实测深夜机场 CDN 拥塞时：台湾节点 23KB/s、新加坡节点 1.2MB/s）；网页加载只暴露 RTT，不暴露带宽 | 用 `speed.cloudflare.com/__down?bytes=N` 实测**单连接吞吐**选节点（见下 auto_select.py），别只看 ping/网页 |
-| 13 | 华为等 IoT 设备（音箱/家庭云存储）批量"连不上"，但 PC 上网正常 | xray 每次重启 tun0 有几十秒空窗，IoT 的长连接云会话（XMPP/CoAP/QUIC）被打断后自愈很慢（有的按小时级重连）；设备侧还常缓存坏 DNS | 避免频繁切节点/重启；设备断电重启 + 手机 App 强杀重开；下次重连前先抓包确认设备云流量（`tcpdump -i br-lan host <设备IP>`） |
+| 13 | 华为等 IoT 设备（音箱/家庭云存储）在 App 里批量显示"设备已离线"，但设备在线、PC 上网正常、国内网站直连无感 | tun-in 的 sniffing `destOverride:["http","tls"]` 把 TLS(443) 连接的目的地**改写为 SNI 域名**；geoip:cn 规则匹配要解析域名，而华为 IoT 域名（如 `whiomplatform.hwcloudtest.cn`）公网 DNS 全 NXDOMAIN → 拿不到 IP → geoip 匹配落空 → CN 流量掉进默认 proxy（海外节点）→ 华为云拒绝海外 IP → 设备反复重连失败。非 443 流量无 SNI 改写仍走直连，所以"网络全通但设备离线"极具迷惑性 | sniffing 一律加 `routeOnly: true`（域名只用于域名分流规则，连接保持原 IP）；诊断实锤：`logread` 里 `taking detour [proxy] for [tcp:<CN-IP>:443]` 与 `app/dns ... rcode: 3` 同时出现 |
 | 14 | 给 7890/7891 显式代理配置了域名分流规则但不生效 | http/socks inbound **默认不开 sniffing**，路由规则拿不到域名，按 IP 匹配走了默认节点；只有 tun-in 天然有 sniffing | 给 http-in/socks-in 加 `"sniffing": {"enabled": true, "destOverride": ["http","tls"]}` |
 | 15 | 域名分流指向的节点连不通/不稳定 | 只有主节点 outbound 带 `sockopt.mark=1`；分流目标节点不带 mark 时其出站 socket 可能被策略路由劫持进 tun0 造成环路 | 域名规则指向的节点 outbound 也要 `sockopt: {mark: 1}`（gen_config.py 已自动处理） |
 | 16 | 想要 Clash 式"自动选最快节点"，但 v26 没有 url-test/loadbalancer | v26 移除 loadbalancer，且运行时无法动态改路由 | 每节点挂一个测试入站（`17900+i` → `node-i`），一个配置测全部节点，PC 侧脚本测 RTT+吞吐后重生成配置（见下 auto_select.py） |
+| 17 | 修复坑 13 后音箱恢复，但家庭云存储 NAS 仍显示离线——`/proc/net/nf_conntrack` 里 XMPP 5223/CoAP 5683/MQTT 1883/TLS 443 全部 ESTABLISHED 且有来有回 | 故障期反复重连失败后 NAS 的云注册状态机卡死：传输层会话能重建，但不再向华为云重新注册，云端一直认为设备离线（音箱 SDK 会自愈，NAS 不会） | 设备断电重启；仍不行再抓开机注册握手流量深挖 |
 
 ## Clash 式自动选优（auto_select.py）
 
